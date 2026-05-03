@@ -1,0 +1,8 @@
+streamlit
+boto3
+pymongo
+python-dotenv
+requests
+pandas
+matplotlib
+numpy
