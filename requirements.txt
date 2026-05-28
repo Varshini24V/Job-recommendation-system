@@ -1,0 +1,12 @@
+streamlit
+boto3
+pymongo
+certifi
+python-dotenv
+requests
+pandas
+matplotlib
+seaborn
+PyPDF2
+scikit-learn
+pypdf

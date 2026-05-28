@@ -1,0 +1,5 @@
+boto3
+pymongo
+certifi
+PyPDF2
+pypdf
