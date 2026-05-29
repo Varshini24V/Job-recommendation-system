@@ -1,551 +1,280 @@
 from db import resumes, jobs, matches
 
 from ranking import (
-    cosine_similarity,
-    keyword_overlap_score,
-    recency_weight,
-    popularity_score,
-    final_hybrid_score
+    extract_skills,
+    final_hybrid_score,
+    TARGET_ROLES
 )
 
 from rag_engine import analyze
-
 from course_recommender import recommend
 
 import json
+
 from datetime import datetime
 
-# =========================================================
-# IMPORTANT SKILLS
-# =========================================================
+TRACKED_SKILLS = ["python", "sql", "aws", "snowflake", "spark", "airflow", "docker", "kubernetes",
+                   "linux", "pandas", "numpy", "tensorflow", "machine learning", "deep learning",
+                   "data engineering", "etl", "api", "cloudformation", "ec2", "s3", "vpn", "sd wan",
+                     "cryptography", "network security", "distributed systems", "datadog", "debugging",
+                      "c programming", "networking protocols", "platform engineering", "reliability engineering"]
 
-IMPORTANT_SKILLS = [
+# FILTER RELEVANT JOBS
 
-    "python",
-    "sql",
-    "aws",
-    "machine learning",
-    "deep learning",
-    "ai",
-    "artificial intelligence",
-    "backend",
-    "data engineering",
-    "data analysis",
-    "mongodb",
-    "postgresql",
-    "mysql",
-    "docker",
-    "kubernetes",
-    "spark",
-    "airflow",
-    "linux",
-    "api",
-    "tensorflow",
-    "pandas",
-    "numpy",
-    "cloud",
-    "etl"
-]
+def filter_jobs(all_jobs, resume_skills):
+    filtered = []
+    fallback_jobs = []
+    for job in all_jobs:
+        title = job.get("title","").lower()
+        description = job.get( "description","").lower()
+        combined_text = ( f"{title} {description}")
 
-# =========================================================
-# EXTRACT SKILLS
-# =========================================================
+        # ROLE FILTER
+        role_match = any(role in combined_text for role in TARGET_ROLES)
 
-def extract_skills(text):
+        if not role_match:
+            continue
+        fallback_jobs.append(job)
 
-    if not text:
-        return []
+        # SKILL FILTER
+        job_skills = extract_skills(combined_text)
+        overlap = (resume_skills.intersection(job_skills))
 
-    text = text.lower()
+        # Require at least one skill overlap
 
-    found_skills = []
+        if len(overlap) >= 1:
+            filtered.append(job)
 
-    for skill in IMPORTANT_SKILLS:
+    # FALLBACK
 
-        if skill in text:
+    if not filtered:
+        print("Using fallback jobs")
+        return fallback_jobs
+    return filtered
 
-            found_skills.append(skill)
+# EXTRACT MISSING SKILLS
+def extract_missing_skills(resume_skills, required_skills,reasoning):
 
-    return list(set(found_skills))
+    missing_skills = list(
+        set(required_skills).difference(
+            set(resume_skills)))
 
+    # FALLBACK FROM AI REASONING
+    reasoning_lower = reasoning.lower()
+    for skill in TRACKED_SKILLS:
+        if (
+            skill in reasoning_lower
+            and
+            skill not in resume_skills
+            and
+            skill not in missing_skills
+        ):
+            missing_skills.append(skill)
 
-# =========================================================
-# DOMAIN FILTER
-# =========================================================
+    return list(set(missing_skills))
 
-TARGET_DOMAINS = [
+# BUILD OUTPUT
+def build_output(job,score_data,resume_skills,required_skills,reasoning):
 
-    "software",
-    "cloud",
-    "backend",
-    "data",
-    "machine learning",
-    "ai",
-    "developer",
-    "engineer",
-    "python",
-    "aws"
-]
+    # MISSING SKILLS
+    missing_skills = extract_missing_skills(resume_skills,required_skills,reasoning)
 
-
-def is_relevant_job(job_description):
-
-    if not job_description:
-        return False
-
-    job_description = job_description.lower()
-
-    for keyword in TARGET_DOMAINS:
-
-        if keyword in job_description:
-            return True
-
-    return False
-
-
-# =========================================================
-# MAIN LAMBDA
-# =========================================================
-
-def lambda_handler(event, context):
-
+    # COURSE RECOMMENDATIONS
     try:
+        if missing_skills:
+            recommended_courses = recommend(missing_skills)
+        else:
+            recommended_courses = []
 
-        print("===================================")
+    except Exception as course_error:
+        print("Course Recommendation Error:",str(course_error))
+        recommended_courses = []
+
+    # FINAL OUTPUT
+    return {"title":job.get('title', 'N/A'),
+            "company":job.get('company', 'N/A'),
+            "final_score":round(score_data["final_score"] * 100,2),
+            "semantic_similarity":round(score_data["semantic_similarity"] * 100,2),
+            "skill_overlap":round(score_data["skill_overlap"] * 100,2),
+            "title_score":round(score_data["title_score"] * 100,2), 
+            "recency_weight": round(score_data["recency_weight"] * 100,2),
+            "popularity_score":round(score_data["popularity_score"] * 100,2),
+            "skills":list(required_skills),
+            "missing_skills":missing_skills,
+            "reasoning":reasoning,
+            "courses": recommended_courses,
+            "apply_link": job.get("redirect_url","#")}
+
+# MAIN LAMBDA
+def lambda_handler(event, context):
+    try:
         print("MATCHING LAMBDA STARTED")
-        print("===================================")
-
-        body = json.loads(
-            event["body"]
-        )
-
-        resume_id = body.get(
-            "resume_id"
-        )
+        # REQUEST BODY
+        body = json.loads(event.get("body","{}"))
+        resume_id = body.get("resume_id")
 
         if not resume_id:
-
             return {
                 "statusCode": 400,
                 "body": json.dumps({
-                    "error":
-                    "resume_id is required"
-                })
-            }
+                    "error": "resume_id is required"
+                })}
 
-        # =================================================
         # FETCH RESUME
-        # =================================================
-
-        resume = resumes.find_one({
-
-            "resume_id":
-            resume_id
-
-        })
-
+        resume = resumes.find_one({"resume_id": resume_id})
         if not resume:
-
             return {
                 "statusCode": 404,
                 "body": json.dumps({
-                    "error":
-                    "Resume not found"
+                    "error":"Resume not found"
                 })
             }
-
         print("Resume Found")
 
-        # =================================================
         # RESUME DATA
-        # =================================================
+        resume_summary = " ".join([
+            resume.get("summary",""),
+            resume.get("raw_text", ""),
+            " ".join(
+                resume.get(
+                    "skills",
+                    []
+                ))])
 
-        resume_summary = resume.get(
-            "summary",
-            ""
-        )
+        resume_embedding = resume.get("embedding",[])
+        resume_skills = extract_skills(resume_summary)
+        print("Resume Skills:",resume_skills)
 
-        resume_embedding = resume.get(
-            "embedding",
-            []
-        )
-
-        resume_skills = extract_skills(
-            resume_summary
-        )
-
-        print(
-            "Resume Skills:",
-            resume_skills
-        )
-
-        # =================================================
         # FETCH JOBS
-        # =================================================
-
         all_jobs = list(
-
-            jobs.find({
-                "embedding": {
-                    "$exists": True
-                }
-            })
-
+            jobs.find({"embedding": {"$exists": True}})
         )
 
-        print(
-            "Total Jobs:",
-            len(all_jobs)
-        )
+        print("Total Jobs:",len(all_jobs))
 
-        # =================================================
-        # FILTER RELEVANT JOBS
-        # =================================================
+        # FILTER JOBS
+        filtered_jobs = filter_jobs(all_jobs,resume_skills)
 
-        filtered_jobs = []
+        print("Filtered Jobs:",len(filtered_jobs))
 
-        for job in all_jobs:
-
-            description = job.get(
-                "description",
-                ""
-            )
-
-            if not is_relevant_job(
-                description
-            ):
-                continue
-
-            description_lower = (
-                description.lower()
-            )
-
-            matched = False
-
-            for skill in resume_skills:
-
-                if skill in description_lower:
-
-                    matched = True
-                    break
-
-            if matched:
-
-                filtered_jobs.append(job)
-
-        print(
-            "Filtered Jobs:",
-            len(filtered_jobs)
-        )
-
-        # =================================================
         # SCORE JOBS
-        # =================================================
-
         scored_jobs = []
-
+        MIN_SCORE_THRESHOLD = 0.35
         for idx, job in enumerate(filtered_jobs):
-
             try:
-
-                print(
-                    f"Scoring Job {idx+1}"
-                )
-
+                print(f"Scoring Job {idx+1}")
+                job_skills = extract_skills(job.get("description",""))
                 score_data = final_hybrid_score(
+                    resume_embedding,job.get("embedding",[]),
+                    resume_skills,
+                    job_skills,
+                    job.get("title",""),
+                    job.get("posted_date","2026-01-01"),
+                    job.get("applicant_count",10))
 
-                    resume_embedding,
+                if (score_data["final_score"]>= MIN_SCORE_THRESHOLD):
 
-                    job.get(
-                        "embedding",
-                        []
-                    ),
-
-                    resume_summary,
-
-                    job.get(
-                        "description",
-                        ""
-                    ),
-
-                    job.get(
-                        "posted_date",
-                        "2026-01-01"
-                    ),
-
-                    job.get(
-                        "applicant_count",
-                        10
-                    )
-                )
-
-                required_skills = extract_skills(
-
-                    job.get(
-                        "description",
-                        ""
-                    )
-                )
-
-                scored_jobs.append({
-
-                    "job":
-                    job,
-
-                    "score":
-                    score_data["final_score"],
-
-                    "score_breakdown":
-                    score_data,
-
-                    "skills":
-                    required_skills
-                })
+                    scored_jobs.append({
+                        "job":job,
+                        "score":score_data["final_score"],
+                        "score_data":score_data,
+                        "skills":job_skills
+                    })
 
             except Exception as scoring_error:
 
-                print(
-                    "Scoring Error:",
-                    str(scoring_error)
-                )
+                print("Scoring Error:",str(scoring_error))
 
-        # =================================================
-        # SORT TOP JOBS
-        # =================================================
-        top_jobs = sorted(
+        # FALLBACK IF EMPTY
+        if not scored_jobs:
 
-            scored_jobs,
+            print("Using fallback scoring" )
 
-            key=lambda x: x["score"],
+            for job in filtered_jobs[:20]:
+                try:
+                    job_skills = extract_skills(job.get("description",""))
+                    score_data = final_hybrid_score(resume_embedding,job.get("embedding",[]),
+                        resume_skills,
+                        job_skills,
+                        job.get("title",""),
+                        job.get("posted_date","2026-01-01"),
+                        job.get("applicant_count",10))
+                    scored_jobs.append({
 
-            reverse=True
+                        "job":job,
+                        "score":score_data["final_score"],
+                        "score_data":score_data,
+                        "skills":job_skills
+                    })
 
-        )[:5]
+                except Exception as fallback_error:
 
-        print(
-            "Top Jobs Selected:",
-            len(top_jobs)
-        )
+                    print("Fallback Error:",str(fallback_error))
 
-        # =================================================
-        # GENERATE OUTPUT
-        # =================================================
+        # SORT JOBS
+        top_jobs = sorted(scored_jobs,
+            key=lambda x: (
+                x["score_data"]["semantic_similarity"],
+                x["score_data"]["skill_overlap"],
+                x["score"]
+            ),
+            reverse=True)[:10]
 
+        print("Top Jobs:", len(top_jobs))
+
+        # FINAL OUTPUT
         output = []
-
         for idx, item in enumerate(top_jobs):
-
             job = item["job"]
+            score_data = item["score_data"]
+            required_skills = item["skills"]
+            print(f"Analyzing Job {idx+1}")
 
-            score = item["score"]
-
-            skills = item["skills"]
-
-            score_breakdown = item[
-                "score_breakdown"
-            ]
-
-            print(
-                f"Analyzing Job {idx+1}"
-            )
-
-            # =============================================
             # AI REASONING
-            # =============================================
-
             try:
-
-                reasoning = analyze(
-
-                resume_summary[:1500],
-
-                job.get(
-                    "description",
-                    ""
-                )[:1500]
-            )
+                reasoning = analyze(resume_summary[:1500],
+                                    job.get("description","")[:1500])
 
             except Exception as ai_error:
+                print("AI Error:", str(ai_error))
+                reasoning = ("AI reasoning unavailable")
 
-                print(
-                    "AI Error:",
-                    str(ai_error)
-                )
+            # BUILD OUTPUT
+            output.append(build_output(job,score_data,resume_skills,required_skills,reasoning))
+        
+        # SAVE MATCHES
+        matches.update_one({"resume_id":resume_id},
+                           {"$set": {"matches":output,
+                                     "updated_at":datetime.utcnow()}},upsert=True)
 
-                reasoning = (
-                    "AI reasoning unavailable"
-                )
+        print("Matches Saved Successfully")
 
-            # =============================================
-            # MISSING SKILLS
-            # =============================================
-
-            missing_skills = []
-
-            for skill in skills:
-
-                if skill not in resume_skills:
-
-                    missing_skills.append(skill)
-
-            # =============================================
-            # COURSE RECOMMENDATION
-            # =============================================
-
-            try:
-
-                recommended_courses = recommend(
-                    missing_skills
-                )
-
-            except Exception as course_error:
-
-                print(
-                    "Course Error:",
-                    str(course_error)
-                )
-
-                recommended_courses = []
-
-            # =============================================
-            # FINAL OUTPUT
-            # =============================================
-
-            output.append({
-
-                "title":
-                job.get(
-                    "title",
-                    "N/A"
-                ),
-
-                "company":
-                job.get(
-                    "company",
-                    "N/A"
-                ),
-
-                "final_score":
-                score,
-
-                "semantic_similarity":
-                score_breakdown[
-                    "semantic_similarity"
-                ],
-
-                "keyword_overlap":
-                score_breakdown[
-                    "keyword_overlap"
-                ],
-
-                "recency_weight":
-                score_breakdown[
-                    "recency_weight"
-                ],
-
-                "popularity_score":
-                score_breakdown[
-                    "popularity_score"
-                ],
-
-                "skills":
-                skills,
-
-                "missing_skills":
-                missing_skills,
-
-                "reasoning":
-                reasoning,
-
-                "courses":
-                recommended_courses,
-
-                "apply_link":
-                job.get(
-                    "redirect_url",
-                    "#"
-                )
-            })
-
-        # =================================================
-        # SAVE TO MONGODB
-        # =================================================
-
-        matches.update_one(
-
-            {
-                "resume_id":
-                resume_id
-            },
-
-            {
-                "$set": {
-
-                    "matches":
-                    output,
-
-                    "updated_at":
-                    datetime.utcnow()
-                }
-            },
-
-            upsert=True
-        )
-
-        print(
-            "Matches Saved Successfully"
-        )
-
-        # =================================================
-        # RESPONSE
-        # =================================================
-
+        # SUCCESS RESPONSE
         return {
-
             "statusCode": 200,
-
             "headers": {
-
                 "Content-Type":
                 "application/json",
-
                 "Access-Control-Allow-Origin":
                 "*"
             },
 
             "body": json.dumps({
-
-                "resume_id":
-                resume_id,
-
-                "matches":
-                output
-            })
+                "resume_id":resume_id,
+                "matches": output})
         }
-
     except Exception as e:
-
-        print(
-            "FATAL ERROR:",
-            str(e)
-        )
+        print("FATAL ERROR:", str(e))
 
         return {
-
             "statusCode": 500,
-
             "headers": {
-
                 "Content-Type":
                 "application/json",
-
                 "Access-Control-Allow-Origin":
                 "*"
             },
-
             "body": json.dumps({
-
-                "error":
-                str(e)
+                "error":str(e)
             })
         }
