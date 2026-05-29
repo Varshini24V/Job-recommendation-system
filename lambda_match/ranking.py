@@ -1,5 +1,83 @@
 from datetime import datetime, timezone
 import math
+import re
+
+# =====================================================
+# IMPORTANT SKILLS
+# =====================================================
+
+IMPORTANT_SKILLS = [
+
+    "python",
+    "sql",
+    "aws",
+    "snowflake",
+    "spark",
+    "airflow",
+    "docker",
+    "kubernetes",
+    "linux",
+    "pandas",
+    "numpy",
+    "tensorflow",
+    "machine learning",
+    "deep learning",
+    "data engineering",
+    "etl",
+    "api",
+    "cloudformation",
+    "ec2",
+    "s3"
+]
+
+# =====================================================
+# TARGET ROLES
+# =====================================================
+
+TARGET_ROLES = [
+
+    "data engineer",
+    "python developer",
+    "backend developer",
+    "aws engineer",
+    "cloud engineer",
+    "software engineer",
+    "ml engineer",
+    "ai engineer",
+    "devops engineer"
+]
+
+# =====================================================
+# CLEAN TEXT
+# =====================================================
+
+def clean_text(text):
+
+    if not text:
+        return ""
+
+    text = text.lower()
+
+    text = re.sub(r"[^a-zA-Z0-9 ]", " ", text)
+
+    return text
+
+# =====================================================
+# EXTRACT SKILLS
+# =====================================================
+
+def extract_skills(text):
+
+    text = clean_text(text)
+
+    found = set()
+
+    for skill in IMPORTANT_SKILLS:
+
+        if skill.lower() in text:
+            found.add(skill)
+
+    return found
 
 # =====================================================
 # COSINE SIMILARITY
@@ -11,8 +89,7 @@ def cosine_similarity(vec1, vec2):
         return 0.0
 
     dot_product = sum(
-        a * b
-        for a, b in zip(vec1, vec2)
+        a * b for a, b in zip(vec1, vec2)
     )
 
     norm1 = math.sqrt(
@@ -23,43 +100,55 @@ def cosine_similarity(vec1, vec2):
         sum(b * b for b in vec2)
     )
 
-    denominator = norm1 * norm2
-
-    if denominator == 0:
+    if norm1 == 0 or norm2 == 0:
         return 0.0
 
-    return dot_product / denominator
+    similarity = (
+        dot_product / (norm1 * norm2)
+    )
 
+    # Normalize to 0 → 1
+    normalized = (
+        similarity + 1
+    ) / 2
+
+    return normalized
 
 # =====================================================
-# KEYWORD OVERLAP
+# SKILL OVERLAP SCORE
 # =====================================================
 
-def keyword_overlap_score(
-    resume_text,
-    job_text
+def skill_overlap_score(
+    resume_skills,
+    job_skills
 ):
 
-    resume_words = set(
-        resume_text.lower().split()
-    )
-
-    job_words = set(
-        job_text.lower().split()
-    )
-
-    if not job_words:
+    if not resume_skills:
         return 0.0
 
-    overlap = resume_words.intersection(
-        job_words
+    matched = (
+        resume_skills.intersection(job_skills)
     )
 
-    return len(overlap) / len(job_words)
-
+    return len(matched) / len(resume_skills)
 
 # =====================================================
-# RECENCY WEIGHT
+# TITLE RELEVANCE
+# =====================================================
+
+def title_relevance_score(job_title):
+
+    title = clean_text(job_title)
+
+    for role in TARGET_ROLES:
+
+        if role in title:
+            return 1.0
+
+    return 0.2
+
+# =====================================================
+# RECENCY SCORE
 # =====================================================
 
 def recency_weight(posted_date):
@@ -85,19 +174,18 @@ def recency_weight(posted_date):
             return 1.0
 
         elif days_old <= 7:
-            return 0.8
+            return 0.9
 
         elif days_old <= 14:
-            return 0.6
+            return 0.7
 
         elif days_old <= 30:
-            return 0.4
+            return 0.5
 
         return 0.2
 
     except:
         return 0.3
-
 
 # =====================================================
 # POPULARITY SCORE
@@ -105,17 +193,16 @@ def recency_weight(posted_date):
 
 def popularity_score(applicant_count):
 
-    if applicant_count <= 10:
-        return 0.3
+    if applicant_count <= 20:
+        return 1.0
 
     elif applicant_count <= 50:
-        return 0.5
+        return 0.8
 
     elif applicant_count <= 100:
-        return 0.7
+        return 0.6
 
-    return 1.0
-
+    return 0.3
 
 # =====================================================
 # FINAL HYBRID SCORE
@@ -125,64 +212,82 @@ def final_hybrid_score(
 
     resume_embedding,
     job_embedding,
-    resume_text,
-    job_text,
-    posted_date="2026-01-01",
-    applicant_count=10
+
+    resume_skills,
+    job_skills,
+
+    job_title,
+
+    posted_date,
+
+    applicant_count
 ):
 
-    # -------------------------------------------------
+    # ----------------------------------------------
     # Semantic Similarity
-    # -------------------------------------------------
+    # ----------------------------------------------
 
     semantic_score = cosine_similarity(
         resume_embedding,
         job_embedding
     )
 
-    # -------------------------------------------------
-    # Keyword Overlap
-    # -------------------------------------------------
+    # ----------------------------------------------
+    # Skill Overlap
+    # ----------------------------------------------
 
-    keyword_score = keyword_overlap_score(
-        resume_text,
-        job_text
+    skill_score = skill_overlap_score(
+        resume_skills,
+        job_skills
     )
 
-    # -------------------------------------------------
-    # Recency Score
-    # -------------------------------------------------
+    # ----------------------------------------------
+    # Title Score
+    # ----------------------------------------------
+
+    title_score = title_relevance_score(
+        job_title
+    )
+
+    # ----------------------------------------------
+    # Recency
+    # ----------------------------------------------
 
     recency_score = recency_weight(
         posted_date
     )
 
-    # -------------------------------------------------
-    # Popularity Score
-    # -------------------------------------------------
+    # ----------------------------------------------
+    # Popularity
+    # ----------------------------------------------
 
     popularity = popularity_score(
         applicant_count
     )
 
-    # -------------------------------------------------
-    # Final Weighted Score
-    # -------------------------------------------------
+    # ----------------------------------------------
+    # FINAL SCORE
+    # ----------------------------------------------
 
-    score = (
+    final_score = (
 
         0.55 * semantic_score
-        + 0.25 * keyword_score
-        + 0.10 * recency_score
-        + 0.10 * popularity
+        + 0.25 * skill_score
+        + 0.10 * title_score
+        + 0.05 * recency_score
+        + 0.05 * popularity
     )
 
     return {
+
         "semantic_similarity":
         round(semantic_score, 4),
 
-        "keyword_overlap":
-        round(keyword_score, 4),
+        "skill_overlap":
+        round(skill_score, 4),
+
+        "title_score":
+        round(title_score, 4),
 
         "recency_weight":
         round(recency_score, 4),
@@ -191,5 +296,5 @@ def final_hybrid_score(
         round(popularity, 4),
 
         "final_score":
-        round(score, 4)
+        round(final_score, 4)
     }

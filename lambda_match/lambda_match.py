@@ -1,106 +1,161 @@
 from db import resumes, jobs, matches
 
 from ranking import (
-    cosine_similarity,
-    keyword_overlap_score,
-    recency_weight,
-    popularity_score,
-    final_hybrid_score
+    extract_skills,
+    final_hybrid_score,
+    TARGET_ROLES
 )
 
 from rag_engine import analyze
-
 from course_recommender import recommend
 
 import json
+
 from datetime import datetime
 
-# =========================================================
-# IMPORTANT SKILLS
-# =========================================================
-
-IMPORTANT_SKILLS = [
-
-    "python",
-    "sql",
-    "aws",
-    "machine learning",
-    "deep learning",
-    "ai",
-    "artificial intelligence",
-    "backend",
-    "data engineering",
-    "data analysis",
-    "mongodb",
-    "postgresql",
-    "mysql",
-    "docker",
-    "kubernetes",
-    "spark",
-    "airflow",
-    "linux",
-    "api",
-    "tensorflow",
-    "pandas",
-    "numpy",
-    "cloud",
-    "etl"
-]
 
 # =========================================================
-# EXTRACT SKILLS
+# FILTER RELEVANT JOBS
 # =========================================================
 
-def extract_skills(text):
+def filter_jobs(all_jobs, resume_skills):
 
-    if not text:
-        return []
+    filtered = []
 
-    text = text.lower()
+    for job in all_jobs:
 
-    found_skills = []
+        title = job.get(
+            "title",
+            ""
+        ).lower()
 
-    for skill in IMPORTANT_SKILLS:
+        description = job.get(
+            "description",
+            ""
+        ).lower()
 
-        if skill in text:
+        combined_text = (
+            f"{title} {description}"
+        )
 
-            found_skills.append(skill)
+        # ---------------------------------------------
+        # ROLE FILTER
+        # ---------------------------------------------
 
-    return list(set(found_skills))
+        role_match = any(
+
+            role in combined_text
+
+            for role in TARGET_ROLES
+        )
+
+        if not role_match:
+            continue
+
+        # ---------------------------------------------
+        # SKILL FILTER
+        # ---------------------------------------------
+
+        job_skills = extract_skills(
+            combined_text
+        )
+
+        overlap = (
+            resume_skills.intersection(
+                job_skills
+            )
+        )
+
+        # Require minimum overlap
+        if len(overlap) < 2:
+            continue
+
+        filtered.append(job)
+
+    return filtered
 
 
 # =========================================================
-# DOMAIN FILTER
+# BUILD MATCH OUTPUT
 # =========================================================
 
-TARGET_DOMAINS = [
+def build_output(
 
-    "software",
-    "cloud",
-    "backend",
-    "data",
-    "machine learning",
-    "ai",
-    "developer",
-    "engineer",
-    "python",
-    "aws"
-]
+    job,
+    score_data,
+    resume_skills,
+    required_skills,
+    reasoning,
+    recommended_courses
+):
 
+    missing_skills = list(
 
-def is_relevant_job(job_description):
+        required_skills.difference(
+            resume_skills
+        )
+    )
 
-    if not job_description:
-        return False
+    return {
 
-    job_description = job_description.lower()
+        "title":
+        job.get(
+            "title",
+            "N/A"
+        ),
 
-    for keyword in TARGET_DOMAINS:
+        "company":
+        job.get(
+            "company",
+            "N/A"
+        ),
 
-        if keyword in job_description:
-            return True
+        "final_score":
+        score_data["final_score"],
 
-    return False
+        "semantic_similarity":
+        score_data[
+            "semantic_similarity"
+        ],
+
+        "skill_overlap":
+        score_data[
+            "skill_overlap"
+        ],
+
+        "title_score":
+        score_data[
+            "title_score"
+        ],
+
+        "recency_weight":
+        score_data[
+            "recency_weight"
+        ],
+
+        "popularity_score":
+        score_data[
+            "popularity_score"
+        ],
+
+        "skills":
+        list(required_skills),
+
+        "missing_skills":
+        missing_skills,
+
+        "reasoning":
+        reasoning,
+
+        "courses":
+        recommended_courses,
+
+        "apply_link":
+        job.get(
+            "redirect_url",
+            "#"
+        )
+    }
 
 
 # =========================================================
@@ -111,12 +166,16 @@ def lambda_handler(event, context):
 
     try:
 
-        print("===================================")
+        print("=" * 50)
         print("MATCHING LAMBDA STARTED")
-        print("===================================")
+        print("=" * 50)
+
+        # =================================================
+        # REQUEST BODY
+        # =================================================
 
         body = json.loads(
-            event["body"]
+            event.get("body", "{}")
         )
 
         resume_id = body.get(
@@ -186,9 +245,11 @@ def lambda_handler(event, context):
         all_jobs = list(
 
             jobs.find({
+
                 "embedding": {
                     "$exists": True
                 }
+
             })
 
         )
@@ -199,39 +260,14 @@ def lambda_handler(event, context):
         )
 
         # =================================================
-        # FILTER RELEVANT JOBS
+        # FILTER JOBS
         # =================================================
 
-        filtered_jobs = []
+        filtered_jobs = filter_jobs(
 
-        for job in all_jobs:
-
-            description = job.get(
-                "description",
-                ""
-            )
-
-            if not is_relevant_job(
-                description
-            ):
-                continue
-
-            description_lower = (
-                description.lower()
-            )
-
-            matched = False
-
-            for skill in resume_skills:
-
-                if skill in description_lower:
-
-                    matched = True
-                    break
-
-            if matched:
-
-                filtered_jobs.append(job)
+            all_jobs,
+            resume_skills
+        )
 
         print(
             "Filtered Jobs:",
@@ -252,6 +288,14 @@ def lambda_handler(event, context):
                     f"Scoring Job {idx+1}"
                 )
 
+                job_skills = extract_skills(
+
+                    job.get(
+                        "description",
+                        ""
+                    )
+                )
+
                 score_data = final_hybrid_score(
 
                     resume_embedding,
@@ -261,10 +305,12 @@ def lambda_handler(event, context):
                         []
                     ),
 
-                    resume_summary,
+                    resume_skills,
+
+                    job_skills,
 
                     job.get(
-                        "description",
+                        "title",
                         ""
                     ),
 
@@ -279,13 +325,15 @@ def lambda_handler(event, context):
                     )
                 )
 
-                required_skills = extract_skills(
+                # -----------------------------------------
+                # SCORE THRESHOLD
+                # -----------------------------------------
 
-                    job.get(
-                        "description",
-                        ""
-                    )
-                )
+                if (
+                    score_data["final_score"]
+                    < 0.55
+                ):
+                    continue
 
                 scored_jobs.append({
 
@@ -295,11 +343,11 @@ def lambda_handler(event, context):
                     "score":
                     score_data["final_score"],
 
-                    "score_breakdown":
+                    "score_data":
                     score_data,
 
                     "skills":
-                    required_skills
+                    job_skills
                 })
 
             except Exception as scoring_error:
@@ -312,6 +360,7 @@ def lambda_handler(event, context):
         # =================================================
         # SORT TOP JOBS
         # =================================================
+
         top_jobs = sorted(
 
             scored_jobs,
@@ -323,12 +372,12 @@ def lambda_handler(event, context):
         )[:5]
 
         print(
-            "Top Jobs Selected:",
+            "Top Jobs:",
             len(top_jobs)
         )
 
         # =================================================
-        # GENERATE OUTPUT
+        # BUILD FINAL OUTPUT
         # =================================================
 
         output = []
@@ -337,33 +386,33 @@ def lambda_handler(event, context):
 
             job = item["job"]
 
-            score = item["score"]
+            score_data = item[
+                "score_data"
+            ]
 
-            skills = item["skills"]
-
-            score_breakdown = item[
-                "score_breakdown"
+            required_skills = item[
+                "skills"
             ]
 
             print(
                 f"Analyzing Job {idx+1}"
             )
 
-            # =============================================
+            # ---------------------------------------------
             # AI REASONING
-            # =============================================
+            # ---------------------------------------------
 
             try:
 
                 reasoning = analyze(
 
-                resume_summary[:1500],
+                    resume_summary[:1500],
 
-                job.get(
-                    "description",
-                    ""
-                )[:1500]
-            )
+                    job.get(
+                        "description",
+                        ""
+                    )[:1500]
+                )
 
             except Exception as ai_error:
 
@@ -376,21 +425,16 @@ def lambda_handler(event, context):
                     "AI reasoning unavailable"
                 )
 
-            # =============================================
-            # MISSING SKILLS
-            # =============================================
+            # ---------------------------------------------
+            # COURSE RECOMMENDATIONS
+            # ---------------------------------------------
 
-            missing_skills = []
+            missing_skills = list(
 
-            for skill in skills:
-
-                if skill not in resume_skills:
-
-                    missing_skills.append(skill)
-
-            # =============================================
-            # COURSE RECOMMENDATION
-            # =============================================
+                required_skills.difference(
+                    resume_skills
+                )
+            )
 
             try:
 
@@ -407,68 +451,30 @@ def lambda_handler(event, context):
 
                 recommended_courses = []
 
-            # =============================================
+            # ---------------------------------------------
             # FINAL OUTPUT
-            # =============================================
+            # ---------------------------------------------
 
-            output.append({
+            output.append(
 
-                "title":
-                job.get(
-                    "title",
-                    "N/A"
-                ),
+                build_output(
 
-                "company":
-                job.get(
-                    "company",
-                    "N/A"
-                ),
+                    job,
 
-                "final_score":
-                score,
+                    score_data,
 
-                "semantic_similarity":
-                score_breakdown[
-                    "semantic_similarity"
-                ],
+                    resume_skills,
 
-                "keyword_overlap":
-                score_breakdown[
-                    "keyword_overlap"
-                ],
+                    required_skills,
 
-                "recency_weight":
-                score_breakdown[
-                    "recency_weight"
-                ],
+                    reasoning,
 
-                "popularity_score":
-                score_breakdown[
-                    "popularity_score"
-                ],
-
-                "skills":
-                skills,
-
-                "missing_skills":
-                missing_skills,
-
-                "reasoning":
-                reasoning,
-
-                "courses":
-                recommended_courses,
-
-                "apply_link":
-                job.get(
-                    "redirect_url",
-                    "#"
+                    recommended_courses
                 )
-            })
+            )
 
         # =================================================
-        # SAVE TO MONGODB
+        # SAVE MATCHES
         # =================================================
 
         matches.update_one(
@@ -497,7 +503,7 @@ def lambda_handler(event, context):
         )
 
         # =================================================
-        # RESPONSE
+        # SUCCESS RESPONSE
         # =================================================
 
         return {
