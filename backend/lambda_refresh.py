@@ -14,7 +14,7 @@ def fetch_jobs():
         f"https://api.adzuna.com/v1/api/jobs/in/search/1"
         f"?app_id={APP_ID}"
         f"&app_key={APP_KEY}"
-        f"&results_per_page=50"
+        f"&results_per_page=100"
         f"&what=software developer"
         f"&content-type=application/json"
     )
